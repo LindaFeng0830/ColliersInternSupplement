@@ -1,0 +1,511 @@
+---
+title: "The 2019 Canadian Federal Election and its Results: Forecasting with Post Stratificiation"
+author: "Yaqi Feng 1003925443"
+date: "December 21, 2020"
+output: pdf_document
+---
+\begin{center}
+github: https://github.com/LindaFeng0830/STA304FinalProject
+\end{center}
+
+
+\newpage
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, error = FALSE, message = FALSE)
+```
+
+```{r echo=FALSE, include=FALSE}
+#Load in the pacakges
+library(cesR)
+library(labelled)
+library(dplyr)
+library(plm)
+library(ggplot2)
+library(xtable)
+library(tidyverse)
+library(lme4)
+library(brms)
+library(tidybayes)
+library(caret)
+library(ROCR)
+library(haven)
+library(pROC)
+library(kableExtra)
+library(ggpubr)
+```
+
+```{r echo=FALSE, include=FALSE}
+###Load in CES and  census dataset
+#Load in 2019 CES online survey
+get_ces("ces2019_web")
+#convert values to factor type
+ces2019_data <- to_factor(ces2019_web)
+#Filter for varaibles of interest
+ces2019_filtered <- ces2019_data %>% 
+  filter((cps19_v_likely == "Certain to vote" | cps19_v_likely == "Likely to vote") & 
+           (cps19_votechoice == "Liberal Party" | cps19_votechoice == "Conservative Party") & 
+           (cps19_gender == "A man" | cps19_gender == "A woman")) %>% 
+  select(cps19_gender, cps19_province, cps19_education, cps19_votechoice, cps19_yob)
+#Remove the NAs
+cesdata <- na.omit(ces2019_filtered)
+#Remove the raw datasets that are no longer useful
+rm(ces2019_web, ces2019_data, ces2019_filtered)
+
+#Load in census data
+census <- read_csv("C:/Users/yaqif/Documents/STA304/Final Project/98-402-X2016010-T1-CANPR-eng.csv")
+#Pivot the census data
+education_level <- c("No certificate, diploma or degree (2016 counts)"，
+                     "Secondary (high) school diploma or equivalency certificate (2016 counts)", 
+                     "Apprenticeship or trades certificate or diploma (2016 counts)", 
+                     "College, CEGEP or other non-university certificate or diploma (2016 counts)", 
+                     "University certificate or diploma below bachelor level (2016 counts)", 
+                     "University certificate, diploma or degree at bachelor level or above (2016 counts)")
+education_column <- census %>% 
+  select("No certificate, diploma or degree (2016 counts)"，
+                     "Secondary (high) school diploma or equivalency certificate (2016 counts)", 
+                     "Apprenticeship or trades certificate or diploma (2016 counts)", 
+                     "College, CEGEP or other non-university certificate or diploma (2016 counts)", 
+                     "University certificate or diploma below bachelor level (2016 counts)", 
+                     "University certificate, diploma or degree at bachelor level or above (2016 counts)")
+census_pivot <- census %>% 
+  select(c("Age", "Sex", "Geographic name" ,"No certificate, diploma or degree (2016 counts)"，
+                     "Secondary (high) school diploma or equivalency certificate (2016 counts)", 
+                     "Apprenticeship or trades certificate or diploma (2016 counts)", 
+                     "College, CEGEP or other non-university certificate or diploma (2016 counts)", 
+                     "University certificate or diploma below bachelor level (2016 counts)", 
+                     "University certificate, diploma or degree at bachelor level or above (2016 counts)")) %>% 
+  pivot_longer(cols = education_level,
+               names_to = 'education', 
+               values_to = "total_count")
+#Filter out re-occuring variables
+census_pivot <- census_pivot %>% 
+  filter(Sex == "Male"| Sex == "Female")
+censusdata <- census_pivot %>% 
+  filter((Age == "25 to 34" | Age == "35 to 44" | Age == "45 to 54" | Age == "55 to 64"),
+         `Geographic name` != "Canada")
+#Remove the raw datasets that are no longer useful
+rm(census, census_pivot, education_level, education_column)
+
+
+###Map data style between survey and census
+#Variables to be mapped in CES: cps19_province, cps19_education, cps19_yob, cps19_gender
+# ... in Census: Sex, Geographic name, education, Age
+
+#Map gender
+censusdata$Sex <- ifelse(censusdata$Sex == "Male", "A man", "A woman")
+cesdata$cps19_gender <- ifelse(cesdata$cps19_gender == "A man", "A man", "A woman")
+cesdata <- rename(cesdata, Sex = cps19_gender)
+unique(cesdata$Sex)
+unique(censusdata$Sex)
+
+#Map geographic name (no need: already same)
+#Rename "Geographic name" to "Province" for ease in model-building
+cesdata <- rename(cesdata, Province = cps19_province)
+censusdata <- rename(censusdata, Province = `Geographic name`)
+unique(censusdata$Province)
+unique(cesdata$Province)
+
+#Map education
+#Divide the education levels in CES data into logical groupings
+no_school <- c("Don't know/ Prefer not to answer", "No schooling", "Completed elementary school", "Some elementary school")
+secondary <- c("Some secondary/ high school", "Completed secondary/ high school")
+other_dip <- c("Some technical, community college, CEGEP, College Classique")
+non_uni_dip <- c("Completed technical, community college, CEGEP, College Classique")
+below_bachelor <- c("Some university")
+bachelor_or_higher <- c("Bachelor's degree","Master's degree", "Professional degree or doctorate")
+cesdata <- cesdata %>% 
+  mutate(modify_edu = case_when(cps19_education %in% no_school ~ "No certificate, diploma or degree (2016 counts)",
+                   cps19_education %in% secondary ~ "Secondary (high) school diploma or equivalency certificate (2016 counts)",
+                   cps19_education %in% other_dip ~ "Apprenticeship or trades certificate or diploma (2016 counts)",
+                   cps19_education %in% non_uni_dip ~ "College, CEGEP or other non-university certificate or diploma (2016 counts)",
+                   cps19_education %in% below_bachelor ~ "University certificate or diploma below bachelor level (2016 counts)",
+    cps19_education %in% bachelor_or_higher ~ "University certificate, diploma or degree at bachelor level or above (2016 counts)"))
+#Delete 'cps19_education' and rename 'modify_edu'
+censusdata <- rename(censusdata, Education = education)
+cesdata$cps19_education <- NULL
+cesdata <- rename(cesdata, Education = modify_edu)
+unique(censusdata$Education)
+unique(cesdata$Education)
+
+#Map age
+#Modify cesdata so that all sample are between age 25 to 64
+#That is, born between 1955 and 1994
+cesdata <- cesdata %>% 
+    filter(cps19_yob != 2010 & cps19_yob != 2009 & cps19_yob != 2008 & cps19_yob != 2007 & cps19_yob != 2006
+            & cps19_yob != 2005 & cps19_yob != 2004 & cps19_yob != 2003 & cps19_yob != 2002 & cps19_yob != 2001
+      & cps19_yob != 2000 & cps19_yob != 1999 & cps19_yob != 1998 & cps19_yob != 1999 & cps19_yob != 1998
+            & cps19_yob != 1997 & cps19_yob != 1996 & cps19_yob != 1995 & cps19_yob != 1954 & cps19_yob != 1953
+            & cps19_yob != 1952 & cps19_yob != 1951 & cps19_yob != 1950 & cps19_yob != 1949 & cps19_yob != 1948
+            & cps19_yob != 1947 & cps19_yob != 1946 & cps19_yob != 1945 & cps19_yob != 1944 & cps19_yob != 1943
+            & cps19_yob != 1942 & cps19_yob != 1941 & cps19_yob != 1940 & cps19_yob != 1939 & cps19_yob != 1938
+            & cps19_yob != 1937 & cps19_yob != 1936 & cps19_yob != 1935 & cps19_yob != 1934 & cps19_yob != 1933
+            & cps19_yob != 1932 & cps19_yob != 1931 & cps19_yob != 1930 & cps19_yob != 1929 & cps19_yob != 1928
+            & cps19_yob != 1927 & cps19_yob != 1926 & cps19_yob != 1925 & cps19_yob != 1924 & cps19_yob != 1923
+            & cps19_yob != 1922 & cps19_yob != 1921 & cps19_yob != 1920)
+#Born between 1985 and 1994
+age25_to34 <- c(1985, 1986, 1987, 1988, 1989, 1990, 1991, 1992, 1993, 1994)
+#Born between 1975 and 1984
+age35_to44 <- c(1975, 1976, 1977, 1978, 1979, 1980, 1981, 1982, 1983, 1984)
+#Born between 1965 and 1974
+age45_to54 <- c(1965, 1966, 1967, 1968, 1969, 1970, 1971, 1972, 1973, 1974)
+#Born between 1955 and 1964
+age55_to64 <- c(1955, 1956, 1957, 1958, 1959, 1960, 1961, 1962, 1963, 1964)
+#Map cesdata
+cesdata <- cesdata %>% 
+    mutate(yob2 = case_when(cps19_yob %in% age25_to34 ~ "25 to 34",
+                     cps19_yob %in% age35_to44 ~ "35 to 44",
+                     cps19_yob %in% age45_to54 ~ "45 to 54",
+                     cps19_yob %in% age55_to64 ~ "55 to 64"))
+#Delete "cps19_yob" and rename "yob2"
+cesdata$cps19_yob <- NULL
+cesdata <- rename(cesdata, Age = yob2)
+unique(censusdata$Age)
+unique(cesdata$Age)
+
+
+###Create cell in both datasets
+cesdata$cell <- paste(cesdata$Sex, cesdata$Age)
+censusdata$cell <- paste(censusdata$Sex, censusdata$Age)
+
+
+###Convert variables to factors
+cesdata <- rename(cesdata, votechoice = cps19_votechoice)
+f.cols.ces <- c("Sex", "Province", "votechoice", "Education", "Age", "cell")
+cesdata[f.cols.ces] <- lapply(cesdata[f.cols.ces], factor)
+f.cols.census <- c("Sex", "Age", "Province", "Education", "total_count", "cell")
+censusdata[f.cols.census] <- lapply(censusdata[f.cols.census], factor) 
+cesdata$votechoice <- relevel(cesdata$votechoice, ref = "Conservative Party")
+#To predict probability of voting for Libearal (using Conservative as ref)
+
+###Check the length of the cell
+length(unique(cesdata$cell))
+length(unique(censusdata$cell))
+
+```
+
+```{r model, echo=FALSE, include=FALSE}
+###Create cell in both datasets
+#cesdata$cell <- paste(cesdata$Sex, cesdata$Age)
+#censusdata$cell <- paste(censusdata$Sex, censusdata$Age)
+#Cell is an interaction of sex and Age
+
+###Build multilevel regression model
+model1 <- glmer(votechoice ~ (1 + Sex| cell)
+                      + Age + Education + Province,
+                      data = cesdata,
+                      family = binomial)
+summary(model1)
+#AIC 15645; BIC 15823
+```
+
+```{r MRP, echo=FALSE, include=FALSE}
+#Post-Stratification
+#calculate the probability of each person voting
+voteprob_2019 <- predict(model1, 
+                         censusdata[, c("Age", "Sex", "Province", "Education", "cell")],
+                         type = "response")
+#Calculate the odds of vote (Which party has more: Liberal or Conservative?)
+votepred_2019 <- ifelse(voteprob_2019 > 0.5, "Liberal Party", "Conservative Party")
+census_pred_result <- cbind(censusdata, votepred_2019)
+
+#Count the vote based on "total_count" variable in census dataset
+#Which represents how many people is represented in this one entry
+census_pred_result <- census_pred_result %>% 
+  mutate(vote_liberal = ifelse(votepred_2019 == "Liberal Party", total_count, 0),
+   vote_conserv = ifelse(votepred_2019 == "Conservative Party", total_count, 0))
+
+#General Election Result
+gen_elect_result <- census_pred_result %>% 
+  summarise(`Liberal Party` = sum(vote_liberal),
+            `Conservative Party` = sum(vote_conserv))
+gen_elect_result
+
+#Election Result by province
+result_by_prov <- census_pred_result %>% group_by(Province) %>% 
+  summarise(`Liberal Party` = sum(vote_liberal),
+            `Conservative Party` = sum(vote_conserv))
+result_by_prov
+
+#Election result by cell
+result_by_cell <- census_pred_result %>% group_by(cell) %>% 
+  summarise(`Liberal Party` = sum(vote_liberal), 
+            `Conservative Party` = sum(vote_conserv))
+result_by_cell
+```
+
+# Abstract
+
+This study aims to use multilevel logistic regression with post-stratification to predict the 2019 Canadian federal election results using *the 2019 Canadian Election Survey* (“CES”) and *the 2016 Census Education Highlight Tables* (“Census”). The prediction is that the Liberal Party wins the general election with 82,520 votes, becoming a minority government of Canada with Justin Trudeau serving as the Prime Minister. The results can be taken and compared to the actual results in hopes of reproducing a similar model and predictions for the upcoming Canadian federal election, or any country’s election that adopts a similar system. \par
+
+# Keyword
+
+*Multilevel Regression*, *Post-stratification*, *Electoral Results Prediction* \par
+
+# Introduction
+
+Canada’s electoral system is based on a parliamentary system of government, modeled on that of the United Kingdom, commonly referred to as a “single-member plurality” or “first-past-the-post” system. In this system, any political party, with one candidate, who wins the highest number of votes wins the election and the right to serve as Prime Minister. An absolute majority is not required, unlike the system in the United States, for a candidate to be elected (The Electoral System of Canada, 2020). \par
+
+The goal of this report is to predict the results of the 2019 Canadian Federal Election under said system, by using data from the CES and the 2016 Census. Specifically, the model will be a multilevel logistic regression, and post-stratification will be applied afterward. \par
+
+The sections that follow will elaborate on the data selection basis, methodology and models used, results, and concluding with a discussion on the results, model limitations, and possible improvements. Analysts or organizations, who are interested in electoral outcomes, can apply the model and result in a similar electoral system to predict the outcome. \par
+
+# Data
+
+The two datasets used in this study are: the *the 2019 Canadian Election Survey* (“CES”) and *the 2016 Census Education Highlight Tables* (“Census”). The former is loaded in directly from R and the latter is retrieved from Statistic Canada. Before cleaning, the CES contains responses from 37,822 respondents, and the Census contains 1,512 entries [^1]. Both datasets are reduced so that there are no reoccurring variables and NAs. Generally speaking, the **target population** of the CES is every Canadian citizen who has registered to vote and will be 18 or older on election day. The **frame population** is a portion of the target population to which the online CES survey delimit, identify, and subsequently allow access to (Fricker, 2015). The **sample population** is hence the 37,822 respondents who completed the CES survey online [^2]. \par
+
+[^1]: The Census contains visibly less observation here because it is a fraction, dedicated to education and basic demographic information, of the complete 2016 Canadian Census. This snapshot of Census is chosen over the complete Census because it better captures for variables that are represented in CES.
+[^2]: The target population of the Census consists of: Canadian citizens (by birth or by naturalization); landed immigrants (permanent residents); and non-permanent residents and their family members living with them in Canada. The frame population would be those who have received the web access codes and those who are capable of completing the census. The sample population is the proportion of the frame population, reportedly 98.4%, who responded to the census.
+
+Both the CES and the Census are detailed in information collecting, therefore some variables may represent the same information under different titles. After a close inspection and careful selection, four variables, represented in both the CES and the Census, are selected to be the predictor variable of interest. They are sex, age, geographic location, and education level. Note that the choice “Other (e.g. Trans, non-binary, two-spirit, gender-queer)” available under Sex in the CES is filtered out because it is not contained in the Census data. For similar reasons, in the Census, “All ages, 15-plus” is also filtered out because only citizens older than 18 are eligible to vote, and the dataset does not provide further detailed grouping for the group labeled “15-plus”. In the end, the cleaned CES and Census data contain 12,359 and 624 observations, respectively. \par
+
+Below is a comparison graph of the CES and Census data. [^3] [^4]
+
+[^3]: Provinces abbreviation by Canada Post. Alberta “AB”; British Columbia “BC”; Manitoba “MB”; New Brunswick “NB”; Newfoundland and Labrador “NL”; Nova Scotia “NS”; Northwest Territories “NT”; Nunavut “NU”; Ontario “ON”; Prince Edward Island “PE”; Quebec “QC”; Saskatchewan “SK”; Yukon “YT”.
+[^4]: Education level by dataset order. 1 for “Apprenticeship or trades certificate or diploma (2016 counts”; 2 for “College, CEGEP or other non-university certificate or diploma (2016 counts)”; 3 for “No certificate, diploma or degree (2016 counts)”; 4 for “Secondary (high) school diploma or equivalency certificate (2016 counts)”; 5 for "University certificate or diploma below bachelor level (2016 counts)"; 6 for "University certificate, diploma or degree at bachelor level or above (2016 counts)".
+
+```{r, echo=FALSE}
+#Group the variable data and prep for graphing
+age_grouping <- rbind(cesdata %>% group_by(Age) %>% 
+                 summarize(frequency = n()/nrow(cesdata)*100, type = "ces data"),
+                censusdata %>% group_by(Age) %>% 
+                 summarise(frequency = sum(as.numeric(total_count))/sum(as.numeric(censusdata$total_count))*100, 
+                           type = "census data"))
+age_grouping$AgeGroups <- c("25-34", "35-44", "45-54", "55-64","25-34", "35-44", "45-54", "55-64")
+age_grouping$Age <- NULL
+sex_grouping <- rbind(cesdata %>% group_by(Sex) %>% 
+                 summarize(frequency = n()/nrow(cesdata)*100, type = "ces data"),
+                censusdata %>% group_by(Sex) %>% 
+                 summarise(frequency = sum(as.numeric(total_count))/sum(as.numeric(censusdata$total_count))*100, 
+                           type = "census data"))
+prov_grouping <- rbind(cesdata %>% group_by(Province) %>% 
+                 summarize(frequency = n()/nrow(cesdata)*100, type = "ces data"),
+                censusdata %>% group_by(Province) %>% 
+                 summarise(frequency = sum(as.numeric(total_count))/sum(as.numeric(censusdata$total_count))*100, 
+                           type = "census data"))
+prov_grouping$Provinces <- c("AB", "BC", "MB", "NB", "NL", "NT", "NS", "NU", "ON", "PE", "QC", "SK", "YT", "AB", "BC", "MB", "NB", "NL", "NT", "NS", "NU", "ON", "PE", "QC", "SK", "YT")
+prov_grouping$Province <- NULL 
+educ_grouping <- rbind(cesdata %>% group_by(Education) %>% 
+                 summarize(frequency = n()/nrow(cesdata)*100, type = "ces data"),
+                censusdata %>% group_by(Education) %>% 
+                 summarise(frequency = sum(as.numeric(total_count))/sum(as.numeric(censusdata$total_count))*100, 
+                           type = "census data"))
+educ_grouping$EducLevel <- c("1", "2", "3", "4", "5", "6", "1", "2", "3", "4", "5", "6")
+educ_grouping$Education <- NULL
+#Graph the data
+age_plot <- ggplot(age_grouping, aes(x=AgeGroups, y=frequency, group = type, color = type)) +
+  geom_line() +theme(legend.position="none")
+sex_plot <- ggplot(sex_grouping, aes(x=Sex, y=frequency, group = type, color = type)) +
+  geom_line() +theme(legend.position="none")
+prov_plot <- ggplot(prov_grouping, aes(x=Provinces, y=frequency, group = type, color = type)) +
+  geom_line() +theme(legend.position="none") 
+educ_plot <- ggplot(educ_grouping, aes(x=EducLevel, y=frequency, group = type, color = type)) +
+  geom_line() +theme(legend.position="none")+ labs(x = "Education Level")
+figure1 <- ggarrange(prov_plot, educ_plot, ggarrange(age_plot, sex_plot, ncol = 2, legend = "right"), ncol=1, nrow=3)
+annotate_figure(figure1,top = text_grob("Figure 1: CES data vs. Census data"))
+```
+
+# Model and Methodology
+
+All of the following model-building processes and analyses are done in R studio. \par
+
+A multilevel logistic regression model is built to predict the electoral results. The CES data is carefully portioned into 8 cells, each cell representing an interaction variable of sex and age, which are the two variables deemed significant to the voting choice. Sex is also treated as a random intercept variable to capture the impacts of different sexes on the model results. \par
+
+A multilevel logistic regression is suitable for predicting vote choices because it accounts for the clustering of subjects within clusters of higher-level units when estimating the effect of subject and cluster characteristics on subject outcomes (Austin & Merlo, 2017). The logistic regression allows for accurate estimation when the dependent variable is binary, a choice between conservative or liberal in this case. In simpler terms, this model is appropriate to use here as its results can be used to explain the relationship between one dependent binary variable and one or more independent variables. \par
+
+The regression model can be expressed in mathematical terms as follows:
+
+\[
+Pr(Y_i\in{Conservative, Liberal}) = logit^{-1}({a_m}+a^{Education}_{j[i]}+a^{Province}_{j[i]})
+\]
+
+In this expression, $a_n$ is the random intercept variable indicating a particular sex group’s impact on a respondent’s voting choice, and n is that sex group. Education and Province are the predictor variables because a respondent’s education level and geographic location are assumed to have a considerable impact on his or her voting choice. For example, individuals living in a province, where there is a historical pattern of voting for liberal, may be impacted by the environment and thus more likely to vote for liberal. However, if he or she has completed a certain level of education, that experience may lead them to choose otherwise instead. The expressions $a^{Education}_{j[i]}$ and $a^{Province}_{j[i]}$ are the coefficients for level 1 categorical variable, education and province, and the footnote j[i] indicates the cell that the ith respondent belongs. All variables used in this model can be found in both the CES and the Census. \par
+
+The glmer() function, found in R package lme4, is used to formulate an approximate marginal maximum likelihood estimate to transform the datasets into estimates of the 2019 Canadian Federal Election results. In the preceding section titled “Discussion”, a graph depicting the Area Under the ROC Curve (“AUC”) will be presented and the model accuracy, as well as performance, will be discussed thoroughly. \par
+
+
+## Post-stratification
+
+Post-stratification corrects for non-sampling error and allows for lower variable estimates. That is, given a population composed of distinct groups, strata, or clusters that differ with regard to the quantity relevant to model estimation, and if the size of these strata can be observed, post-stratification can obtain a more accurate estimate of the quantity of interest by correcting for any imbalance in the representation of the strata in the sample (Reilly, Gelman, & Katz, 2001). \par 
+
+To apply the post-stratification technique, using the Census data, it is assumed that there is no significant change in the Canadian population between 2016 and 2019. The post-stratified proportion of voters voting for either the liberal party, represented by Justin Trudeau, or the conservative party, represented by Andrew Scheer, can be expressed as follows:
+
+\[
+\widehat{y}^{PS} = \frac{\sum N_j \widehat{y_j}}{\sum N_j}
+\]
+
+This expression aims to estimate the weighted average of the proportion of voters choosing liberal or conservative, where N represents each person’s assigned weight and  $\widehat{y}_j$ represents the voting proportion estimator for the parties. Notice that in this model, the election results are calculated as if there is only a binary choice between liberal and conservative. However, Canada, by adopting the “first-past-the-post” electoral system, actually allows for multiple candidates to be elected to the House at once. In the “Weaknesses” section that follows, this point will be discussed in detail. \par
+
+The post-stratification process consists of two steps. To begin with, a logical function is used to determine whether a particular party has over half (0.5) of the support in a specific demographic group [^5]. If so, the number of votes that belong to this specific demographic group is awarded to that party. \par
+
+[^5]: The “demographic group” here refers to the groups represented in the Census, comprised of Age, Sex, Province, and Education criteria. For example, one group could be a man aged 25-34 from Ontario with no certificate, diploma, or degree.
+
+
+
+
+# Results
+The regression results after post-stratification indicate that the liberal party will receive 82,520 votes, winning the conservative party by 10,626 votes. The conservative party will receive 71,894 votes. In practical terms, the liberal party will win the federal election and becomes a minority government of Canada. And, its party leader, Justin Trudeau, gets the right to serve as the Prime Minister. The conservative party loses by a slight disadvantage and becomes the Official Opposition instead. \par
+
+```{r echo=FALSE}
+kable(gen_elect_result, caption= "Table 1: Election Result")
+```
+
+The Area under the ROC Curve (“AUC”), depicted in Figure 1 below, is 0.69. AUC tells how much the model is capable of distinguishing between classes. The higher the AUC, the better the model is at predicting values at their actual value. In this study, the higher the AUC, the better the model is at distinguishing between voters who choose to vote for liberal and for conservative. An AUC value of 0.69 indicates that this model is relatively effective in doing so. \par
+```{r echo=FALSE}
+#ROC curve ************MODEL 1*******************
+roc_p <- predict(model1, type = "response")
+roc_l <- roc(cesdata$votechoice ~ roc_p)
+## The True Positive Rate
+TPR <- roc_l$sensitivities
+## The False Positive Rate
+FPR <- 1 - roc_l$specificities
+roc <- data.frame(FPR,TPR)
+
+#ROC curve
+ggplot(roc, aes(FPR,TPR)) + 
+  geom_line(size = 2, alpha = 0.7,col='Blue') +
+  geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), linetype="dashed") +
+  labs(title = "Figure 2: ROC Curve",
+    x = "False Positive Rate", 
+       y = "True Positive Rate (Sensitivity)") +
+  annotate("text", x = 0.75, y = 0.5, vjust = 0, 
+           label = paste("AUC =",round(auc(roc_l),2)))
+
+
+
+```
+
+\newpage
+
+# Discussion
+
+In this report, the CES and Census have been used to predict the 2019 Canadian federal election results. The CES, conducted in 2019, was done through an online survey and thereby is subject to sampling biases like the volunteer bias. Therefore, the Census, conducted in 2016, is used to apply the post-stratification technique onto the multilevel logistic regression model built using the CES data. \par
+
+The CES data was carefully portioned into 8 cells, as described in the previous sections, each representing an interaction variable of sex and age. The table below summarizes the predicted number of votes awarded to each party in each cell:  
+
+
+```{r echo=FALSE}
+kable(result_by_cell, caption = "Table 2: Votes for Liberal or Conservative by cell")
+```
+In conclusion, based on the estimation, the liberal party wins the federal election at a slight advantage, 82,520 over 71,894 votes, and becomes a minority government of Canada. Its party leader, Justin Trudeau, subsequently wins the right to serve as Prime Minister. The model has an AUC of 0.69, suggesting that the model performs fairly well on distinguishing the proportion of voters voting for the liberal party or the conservative party. \par
+
+## Weaknesses
+
+In the data cleaning process, the size of the Census data and the CES data is significantly reduced. This is due to a few key filtering decisions. Firstly, only respondents who indicated that they are “certain to vote” or “likely to vote” are kept in the CES data to maximize the accuracy of the voting results. However, this decision may be subject to sampling bias since the responses may not reflect the respondent’s actual level of willingness to vote, thereby hindering the accuracy of the prediction results. Secondly, the category “Other (e.g. Trans, non-binary, two-spirit, gender-queer)” is removed from the CES data because it is not represented in the Census data, which only contains a binary choice of a male or a female under "Sex". The removal of an entire category may be subject to an under-coverage bias, suggesting that some members of the population, in this case, the people who identify their sex as “Others”, are inadequately represented in the sample. The underrepresentation of an entire demographic group will negatively impact the model’s accuracy, causing deviations from the actual result, especially when both the random intercept variable and the cell involves the variable “Sex” [^6]. \par 
+
+[^6]: The age group “All ages, 15-plus” is removed for similar reasons as removing the “Other” group in Sex. 
+
+Another weakness of this model, and possibly the most visible one, is that this model assumes that the Canadian electoral outcome is binary. As discussed in the model section, the multilevel logistic regression model can appropriately describe the data and explain the relationship between one dependent binary variable and numerous independent variables. However, in reality, the Canadian electoral system allows for multiple candidates, and a candidate does not have to win an absolute majority to declare an electoral victory. In fact, in the actual 2019 election, none of the parties won over 50% of the votes. Therefore, even if this model did predict correctly that the liberal party won the election, the predictions on the exact number of votes in total and in each province are likely flawed. This weakness can also be easily observed as the model indicates some provinces contribute zero votes to the parties. \par
+
+```{r echo=FALSE}
+#Show votes by province
+kable(result_by_prov, caption = "Table 3: Votes for Liberal or Conservative by Province")
+
+#Graph Votes by Province
+province <- c(rep(as.character(result_by_prov$Province),2))
+vote <- rep(c(as.numeric(result_by_prov$`Liberal Party`), 
+              as.numeric(result_by_prov$`Conservative Party`)))
+Party <- c(rep("Liberal Party", length(result_by_prov$`Liberal Party`)),
+          rep("Conservative Party", length(result_by_prov$`Conservative Party`)))
+data1 <- data.frame(province, vote, Party)
+data1$provinces <- c("AB", "BC", "MB", "NB", "NL", "NT", "NS", "NU", "ON", "PE", "QC", "SK", "YT", "AB", "BC", "MB", "NB", "NL", "NT", "NS", "NU", "ON", "PE", "QC", "SK", "YT")
+data1$province <- NULL
+
+data1 %>% ggplot(aes(fill = Party, y = vote, x = provinces)) +
+  geom_bar(position = position_dodge(), stat = "identity")+ 
+  labs(title = "Figure 2: Votes for Liberal or Conservative by Province", x = "Provinces", y = "Votes") +
+  scale_fill_brewer(palette = "Paired")
+
+
+
+
+```
+
+\newpage
+
+# Next Steps
+
+Going forward, the model results should be compared closely to the actual 2019 federal election results to evaluate the significance of each predictor variable. The model efficiency and accuracy should also be analyzed and compared in a sophisticated way so that the modeling weakness, assuming the electoral outcome is binary, can be somewhat neglected. For example, perhaps the proportion of voters voting for liberal or conservative should be compared and analyzed rather than the actual number output from the model. Moreover, remodeling can be done using a different approach. For example, a multinomial regression is perhaps more suitable for the Canadian electoral system. Such next steps to take should grant the model presented in this report more predictor variables, or even more model to work with, thereby improving both the model efficiency and accuracy. \par
+
+\newpage
+
+# References
+
+1. Steven Ruggles, Sarah Flood, Ronald Goeken, Josiah Grover, Erin Meyer, Jose Pacas and Matthew Sobek. IPUMS USA: Version 10.0 [dataset].    Minneapolis, MN: IPUMS, 2020. https://doi.org/10.18128/D010.V10.0
+
+2. Stephenson, Laura B; Harell, Allison; Rubenson, Daniel; Loewen, Peter John, 2020, '2019 Canadian Election Study - Online Survey', https://doi.org/10.7910/DVN/DUS88V, Harvard Dataverse, V1
+  Stephenson, Laura, Allison Harrel, Daniel Rubenson and Peter Loewen. Forthcoming. 'Measuring Preferences and Behaviour in the 2019 Canadian Election Study,' Canadian Journal of Political Science.
+
+3. 2016 Education Census
+
+4. Paul A. Hodgetts and Rohan Alexander (2020). cesR: Access the CES
+  Datasets a Little Easier.. R package version 0.1.0.
+
+5. Joseph Larmarange (2020). labelled: Manipulating Labelled Data. R package
+  version 2.7.0. https://CRAN.R-project.org/package=labelled
+
+6. Hadley Wickham, Romain François, Lionel Henry and Kirill Müller (2020).
+  dplyr: A Grammar of Data Manipulation. R package version 1.0.2.
+  https://CRAN.R-project.org/package=dplyr
+
+7. Millo G (2017). “Robust Standard Error Estimators for Panel Models: A
+Unifying Approach.” _Journal of Statistical Software_, *82*(3), 1-27. doi:
+10.18637/jss.v082.i03 (URL: https://doi.org/10.18637/jss.v082.i03).
+
+8. H. Wickham. ggplot2: Elegant Graphics for Data Analysis. Springer-Verlag
+  New York, 2016.
+
+9. David B. Dahl, David Scott, Charles Roosen, Arni Magnusson and Jonathan
+  Swinton (2019). xtable: Export Tables to LaTeX or HTML. R package version
+  1.8-4. https://CRAN.R-project.org/package=xtable
+
+10. Wickham et al., (2019). Welcome to the tidyverse. Journal of Open Source
+  Software, 4(43), 1686, https://doi.org/10.21105/joss.01686
+
+11. Douglas Bates, Martin Maechler, Ben Bolker, Steve Walker (2015). Fitting
+  Linear Mixed-Effects Models Using lme4. Journal of Statistical Software,
+  67(1), 1-48. doi:10.18637/jss.v067.i01.
+  
+12. Paul-Christian Bürkner (2018). Advanced Bayesian Multilevel Modeling with
+  the R Package brms. The R Journal, 10(1), 395-411.
+  doi:10.32614/RJ-2018-017
+  
+13. Kay M (2020). _tidybayes: Tidy Data and Geoms for Bayesian Models_. doi:
+10.5281/zenodo.1308151 (URL: https://doi.org/10.5281/zenodo.1308151), R
+package version 2.1.1, <URL: http://mjskay.github.io/tidybayes/>.
+
+14. Max Kuhn (2020). caret: Classification and Regression Training. R package
+  version 6.0-86. https://CRAN.R-project.org/package=caret
+
+15. Sing T, Sander O, Beerenwinkel N, Lengauer T (2005). “ROCR: visualizing
+classifier performance in R.” _Bioinformatics_, *21*(20), 7881. <URL:
+http://rocr.bioinf.mpi-sb.mpg.de>.
+
+16. Hadley Wickham and Evan Miller (2020). haven: Import and Export 'SPSS',
+  'Stata' and 'SAS' Files. R package version 2.3.1.
+  https://CRAN.R-project.org/package=haven
+  
+17. Xavier Robin, Natacha Turck, Alexandre Hainard, Natalia Tiberti,
+  Frédérique Lisacek, Jean-Charles Sanchez and Markus Müller (2011). pROC:
+  an open-source package for R and S+ to analyze and compare ROC curves.
+  BMC Bioinformatics, 12, p. 77.  DOI: 10.1186/1471-2105-12-77
+  <http://www.biomedcentral.com/1471-2105/12/77/>
+
+18. Hao Zhu (2020). kableExtra: Construct Complex Table with 'kable' and Pipe
+  Syntax. R package version 1.2.1.
+  https://CRAN.R-project.org/package=kableExtra
+  
+19. Alboukadel Kassambara (2020). ggpubr: 'ggplot2' Based
+  Publication Ready Plots. R package version 0.4.0.
+  https://CRAN.R-project.org/package=ggpubr
+
+20. Austin, P. C., & Merlo, J. (2017). Intermediate and advanced topics in multilevel logistic regression analysis. Wiley Statistics in Medicine.
+
+21. Fricker, R. D. (2015). Sampling Methods for Online Surveys. 
+
+22. Reilly, C., Gelman, A., & Katz, J. (2001). Poststratification Without Population Level Information on the Poststratifying Variable, With Application to Political Polling. Journal of the American Statistical Association.
+
+23. The Electoral System of Canada. (2020, December 9). Retrieved from Elections Canada: https://www.elections.ca/content.aspx?section=res&dir=ces&document=part1&lang=e
+
+24. What is Logistic Regression? (n.d.). Retrieved from Statistics Solutions: https://www.statisticssolutions.com/what-is-logistic-regression/
+
