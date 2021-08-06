@@ -1,4 +1,6 @@
 This folder contains two projects. The American election predictive analysis was a group project done in academic environment, 
 and the Canadian election predictive analysis was an individual and reiterative project of the former.
+此文件夹内含有两份预测性分析报告，一份是预测美国大选结果，一份是预测加拿大大选结果。
 
 Both the original R Markdown file and the knited PDFs are uploaded.
+后标有PDF的是最终报告文档，标有RMD的是含有代码的R markdown源文件。
