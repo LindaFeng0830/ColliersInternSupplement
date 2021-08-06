@@ -1,0 +1,331 @@
+---
+title: "Forecasting U.S. Presidential election 2020 with non-representative polls"
+author: "Heran Zhou, Xinyu Zhong, Yaqi Feng, Yuhan Gu"
+date: "Nov.02 2020"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+\newpage
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,warning = FALSE, message = FALSE)
+library(tidyverse)
+library(knitr)
+library(lme4)
+library(brms)
+library(tidybayes)
+library(caret)
+library(pROC)
+library(kableExtra)
+library(ggpubr)
+```
+
+
+```{r echo=F, include=F}
+# Loading in the cleaned survey Data
+survey_data <- read_csv("survey_data.csv")
+# Loading in the cleaned census Data
+census_data <- read_csv("census_data.csv")
+# change data type
+col_names1 <- colnames(survey_data)
+survey_data[,col_names1] <- lapply(survey_data[,col_names1], as.factor)
+col_names2 <- colnames(census_data[,-6])
+census_data[,col_names2] <- lapply(census_data[,col_names2], as.factor)
+# check
+census_data <- na.omit(census_data)
+summary(survey_data)
+summary(census_data)
+#mutate data for mod
+subdata <- survey_data %>%
+  filter(vote_2020=="Donald Trump"|vote_2020=="Joe Biden")
+subdata$vote_2020 <- droplevels(subdata$vote_2020)
+subdata$vote_2020 <- relevel(subdata$vote_2020, ref = "Joe Biden")  
+#so the result will be the odds vote for Donald Trump
+```
+
+
+```{r echo=F, include=F}
+age_data <- rbind(survey_data %>% group_by(age) %>%
+                    summarise(frequence = n()/nrow(survey_data)*100, type="survey"), 
+                  census_data %>% group_by(age) %>%
+                    summarise(frequence = n()/nrow(census_data)*100, type="census"))
+gender_data <- rbind(survey_data %>% group_by(gender) %>%
+                    summarise(frequence = n()/nrow(survey_data)*100, type="survey"), 
+                  census_data %>% group_by(gender) %>%
+                    summarise(frequence = n()/nrow(census_data)*100, type="census"))
+race_data <- rbind(survey_data %>% group_by(race) %>%
+                    summarise(frequence = n()/nrow(survey_data)*100, type="survey"), 
+                  census_data %>% group_by(race) %>%
+                    summarise(frequence = n()/nrow(census_data)*100, type="census"))
+hispanic_data <- rbind(survey_data %>% group_by(hispanic) %>%
+                    summarise(frequence = n()/nrow(survey_data)*100, type="survey"), 
+                  census_data %>% group_by(hispanic) %>%
+                    summarise(frequence = n()/nrow(census_data)*100, type="census"))
+labor_data <- rbind(survey_data %>% group_by(labor) %>%
+                    summarise(frequence = n()/nrow(survey_data)*100, type="survey"), 
+                  census_data %>% group_by(labor) %>%
+                    summarise(frequence = n()/nrow(census_data)*100, type="census"))
+income_data <- rbind(survey_data %>% group_by(household_income) %>%
+                    summarise(frequence = n()/nrow(survey_data)*100, type="survey"), 
+                  census_data %>% group_by(household_income) %>%
+                    summarise(frequence = n()/nrow(census_data)*100, type="census"))
+state_data <- rbind(survey_data %>% group_by(state) %>%
+                    summarise(frequence = n()/nrow(survey_data)*100, type="survey"), 
+                  census_data %>% group_by(state) %>%
+                    summarise(frequence = n()/nrow(census_data)*100, type="census"))
+```
+
+```{r plot1, echo=F, include=F}
+# show all varibale
+age <- ggplot(age_data, aes(x=age, y=frequence, group = type, color = type)) +
+  geom_line() +theme(legend.position="none")
+gender <- ggplot(gender_data, aes(x=gender, y=frequence, group = type, color = type)) +
+  geom_line() +theme(legend.position="none")
+labor <- ggplot(labor_data, aes(x=labor, y=frequence, group = type, color = type)) +
+  geom_line() 
+race <- ggplot(race_data, aes(x=race, y=frequence, group = type, color = type)) +
+  geom_line() +theme(legend.position="none")
+income <- ggplot(income_data, aes(x=household_income, y=frequence, group = type, color = type)) +
+  geom_line() +theme(legend.position="none")
+state <- ggplot(state_data, aes(x=state, y=frequence, group = type, color = type)) +
+  geom_line() +theme(legend.position="none")
+```
+
+```{r echo=F,include=F}
+t1s <- Sys.time()
+mod1 <- glmer(vote_2020 ~ (1+age|cell) + gender + race
+             + labor + household_income + state,
+             family=binomial, data = subdata)
+t1e <- Sys.time()
+t1e-t1s
+summary(mod1)
+```
+
+
+```{r echo=F, include=F}
+#Post-Stratification
+#calculate the probability that each person will vote
+vote_prob_2020 <- predict(mod1, census_data[,c("age","gender","state","household_income", "labor",
+                                              "race","cell")], type="response")
+#calculate the odds of vote is more for Trump or Biden
+vote_pred_2020 <- ifelse(vote_prob_2020 > 0.5,"Donald Trump","Joe Biden")
+census_result <- cbind(census_data, vote_pred_2020)
+
+#count vote based on person weight (representative of this person) in census data
+census_result <- census_result %>%
+  mutate(vote_trump = ifelse(vote_pred_2020=="Donald Trump", perwt, 0),
+         vote_biden = ifelse(vote_pred_2020=="Joe Biden", perwt, 0))
+result <- census_result %>% group_by(cell) %>%
+  summarise(Trump=sum(vote_trump)/sum(perwt), Biden=sum(vote_biden)/sum(perwt))
+#total vote of each state
+#total vote in each state
+states_pred <- census_result %>% 
+  group_by(state) %>%
+  summarise(Trump=sum(vote_trump), Biden=sum(vote_biden))
+states_pred$win <- ifelse(states_pred$Trump > states_pred$Biden, "Donald Trump","Joe Biden")
+states_pred 
+```
+
+```{r echo=F, include=F}
+#Mutate electoral votes per state according to the mechanism of U.S. election
+#each state has different counts
+states_pred<-states_pred %>% 
+  mutate(electoral_votes = case_when(
+    state=="CA"~55,state=="TX"~38,state=="FL"~29,state=="NY"~29,state=="IL"~20,
+    state=="PA"~20,state=="OH"~18,state=="GA"~16,state=="MI"~16,state=="NC"~15,
+    state=="NJ"~14,state=="VA"~13,state=="WA"~12,state=="AZ"~11,state=="IN"~11,
+    state=="MA"~11,state=="TN"~11,state=="MD"~10,state=="MN"~10,state=="MO"~10,
+    state=="WI"~10,state=="AL"~9,state=="CO"~9,state=="SC"~9,state=="KY"~8,
+    state=="LA"~8,state=="CT"~7,state=="OK"~7,state=="OR"~7,state=="AR"~6,
+    state=="IA"~6,state=="KS"~6,state=="MS"~6,state=="NV"~6,state=="UT"~6,                     
+    state=="NE"~5,state=="NM"~5,state=="WV"~5,state=="HI"~4,state=="ID"~4,
+    state=="ME"~4,state=="NH"~4,state=="RI"~4,state=="AK"~3,state=="DE"~3,
+    state=="MT"~3,state=="ND"~3,state=="SD"~3,state=="VT"~3,state=="WY"~3,state=="DC"~3)) 
+election_result <- states_pred %>% group_by(win) %>% 
+  summarise(total_votes=sum(electoral_votes)) 
+```
+
+```{r plot2, echo=F, include=F}
+#the states >= 20 vote
+e_high <- states_pred %>%
+  filter(electoral_votes>=20)
+e_1 <- data.frame(cbind(state=rep(as.character(e_high$state),2),
+            vote=c(as.numeric(e_high$Trump),as.numeric(e_high$Biden)),
+            type=c(rep("Trump",nrow(e_high)),rep("Biden",nrow(e_high)))))
+
+#states has vote between 10 to 19
+e_mid <- states_pred %>%
+  filter(electoral_votes<20 & electoral_votes>=10)
+e_2 <- data.frame(cbind(state=rep(as.character(e_mid$state),2),
+            vote=c(as.numeric(e_mid$Trump),as.numeric(e_mid$Biden)),
+            type=c(rep("Trump",nrow(e_mid)),rep("Biden",nrow(e_mid)))))
+#state vote < 10
+e_low <- states_pred %>%
+  filter(electoral_votes<10)
+e_3 <- data.frame(cbind(state=rep(as.character(e_low$state),2),
+            vote=c(as.numeric(e_low$Trump),as.numeric(e_low$Biden)),
+            type=c(rep("Trump",nrow(e_low)),rep("Biden",nrow(e_low)))))
+#plot
+ev_1 <- ggplot(data=e_1, aes(x=state, y=vote, fill=type)) +
+  geom_bar(stat="identity", position=position_dodge())+
+  scale_fill_brewer(palette="Paired") +
+  labs(title = "Electoral vote >=20")
+
+ev_2 <- ggplot(data=e_2, aes(x=state, y=vote, fill=type)) +
+  geom_bar(stat="identity", position=position_dodge())+
+  scale_fill_brewer(palette="Paired") +
+  labs(title = "10<= Electoral vote <20")
+
+ev_3 <- ggplot(data=e_3, aes(x=state, y=vote, fill=type)) +
+  geom_bar(stat="identity", position=position_dodge())+
+  scale_fill_brewer(palette="Paired") + 
+  labs(title = "Electoral vote < 10") +
+  theme(axis.text.x=element_text(angle=90, hjust=1))
+```
+
+# Model
+
+Multilevel logistic regression model is utilized to predict the election results. The survey data was partitioned into 14 cells, with each cell representing an interaction variable of gender and race. This is because gender and race are strong predictors of the election results as determined by our frequency analysis. Furthermore, age is treated as a random intercept to capture the impacts among different age groups and reduce the model variance and standard error.\par
+
+## Model Specifics
+
+The model has an expression as follows:
+\[
+ Pr(Y_i \in{Trump, Biden}) =  logit^{-1}({a_m + a^{labor}_{j[i]} + a^{household income}_{j[i]} + a^{state}_{j[i]}})
+\]
+
+Where $a_m$ is a random intercept representing an individual’s voting intention impact from his age group and m is the individual’s corresponding age group. The expressions $a^{labor}_{j[i]}$,  $a^{household income}_{j[i]}$ and $a^{state}_{j[i]}$ indicate the coefficients for each level 1 categorical variable, and the footnote j[i] represents the cell that the ith respondent belongs. Labor, household income and state are the predictor variables because we assume they have relatively strong correlations with an individual’s voting intentions. Such variables exist in both the survey and census data. \par
+
+The model is run through R studio. To adjust and transform the data on hand into accurate estimates of the 2020 election results, we use the approximate marginal maximum likelihood estimates obtained from the glmer() function in the R package lme4 (Bates, Maechler, Bolker & Walker, 2015). Most of the variables were excluded during the data cleaning process because they simply do not exist in both the survey and census data set.\par
+
+The Area Under the ROC Curve (“AUC”) is employed to measure the model performance since it can most effectively distinguish between two diagnostic groups under a logistic regression model.
+\par
+
+## Post-Stratification 
+Post-stratification, in plain language, corrects for any imbalance in the representation of the groups, or strata, in the sample obtained, knowing that the population is composed of distinct groups that differ with respect to the estimating quantity of interest. This technique is useful because it not only allows for more accurate estimates of population quantities to be obtained in the context of survey sampling, but also corrects non-sampling errors as well. (Reilly, Gelman, & Katz, 2001)\par
+
+We calculate the post-stratified proportions of voters voting for Biden and hence the democratic party by the expression as follows: 
+
+\[
+\widehat{y}^{PS} = \frac{\sum N_j \widehat{y_j}}{\sum N_j}
+\]
+
+\[
+\widehat{y}^{PS}=\frac{\sum\limits_i[if(\frac{\sum\limits_j\widehat{y}_j * N_{ji}}{\sum\limits_j N_{ji}} > 0.5, 1, 0) * V_i]}{\sum\limits_i V_i}
+\]
+
+
+Where N is the weight by person, $\widehat{y}_j$ is the voting proportion estimator for either Biden or Trump, V is the electoral college votes, j represents the  $j^{th}$ cell of race combined with gender and i represents the U.S. states. The core idea is to calculate a weighted average of the proportion of Biden or Trump voters across the U.S. states. \par
+The process comprises two steps. First, we estimate whether an election candidate has over half of the polling support in a specific state by calculating whether a state’s weighted average number of Biden or Trump voters is greater than 0.5. In accordance with the “winner takes all” system, if either presidential candidate has over half of the polling support in a certain state, he is taking all the electoral college votes. Therefore, his weight for the state’s electoral votes will be 1 (100%). In contrast, if his support is under 0.5, he will take 0 (0%) of the electoral votes. The cell hence has two levels. The first level is a combination of gender and race which is used to differentiate between individuals, and the second level is U.S. states to differentiate between states’ electoral votes.\par
+
+## Aditional information
+The post-stratification weighting used herein was conducted based on electoral college votes rather than specific state populations. This is because the polling for the U.S. presidential candidates is ultimately calculated in electoral votes rather than population polling. It would be more precise to use the electoral votes as the weights for state-level proportions of voters for each party.\par
+
+
+# Results
+The proportion of voters in favour of voting for Biden and thus the democratic party was calculated to be 0.578 approximately, winning the republican party by 84 votes. This calculation is based on the post-stratification analysis of the number of voters in favour of the candidates modelled by a multilevel logistic regression model. Such a model accounts for an individual’s combination of age and race, labor status, household income and state. The Area Under the ROC Curve (“AUC”) is 0.71, which implies that the model is relatively effective in distinguishing between the proportion of voters in favour of the democratic party and the proportion of those in favour of the republican party.\par. 
+```{r echo=F}
+#ROC curve
+roc_p <- predict(mod1, type = "response")
+roc_l <- roc(subdata$vote_2020 ~ roc_p)
+## Setting levels: control = 0, case = 1
+## Setting direction: controls < cases
+## The True Positive Rate ##
+TPR <- roc_l$sensitivities
+## The False Positive Rate ##
+FPR <- 1 - roc_l$specificities
+roc <- data.frame(FPR,TPR)
+#ROC curve
+ggplot(roc, aes(FPR,TPR)) + 
+  geom_line(size = 2, alpha = 0.7,col='red') +
+  geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), linetype="dashed") +
+  labs(title = "Figure 1: ROC Curve",
+    x = "False Positive Rate (1-Specificity)", 
+       y = "True Positive Rate (Sensitivity)") +
+  annotate("text", x = 0.75, y = 0.5, vjust = 0, 
+           label = paste("AUC =",round(auc(roc_l),2)))
+```
+The Area Under the ROC Curve (“AUC”) is 0.71, which implies that the model is relatively effective in distinguishing between the proportion of voters in favour of the democratic party and the proportion of those in favour of the republican party. \par
+
+# Discussion
+We have utilized the data from Democracy Fund + UCLA Nationscape survey data (2020) and the IPUMS USA census data (2018) to predict the upcoming 2020 general election result. Note that the Nationscape survey is voluntary and therefore is subject to volunteer bias. Furthermore, the 2020 election results are estimated based on a 2018 survey. Respondents’ voting intentions may change over the two-year period and therefore the sample data is not very representative. \par
+```{r echo=F}
+plot1 <- ggarrange(state, income, race,
+                   ggarrange(age, gender, labor, ncol=3),nrow = 4)
+annotate_figure(plot1,top = text_grob("Figure 2: Survey data vs. Census data"))
+
+```
+
+
+In previous sections, a multilevel logistic regression model with post-stratification was performed to estimate the number of voters for each party. The survey data was partitioned into 14 cells, with each cell representing a combination of gender and race. The sample model was then used to calculate the proportion of each party’s voters within each cell, and subsequently the cell-level results were proportionally aggregated to a national-level estimate by post-stratification methods.  \par
+
+```{r echo=F}
+kable(result, caption = "Table 1:surpport for Trump and Biden in each cell")
+```
+
+## Conclusion
+Based on the estimation, the proportion of the voters in favour of the Democratic party is 0.578, or 311 out of 538 votes. Therefore, we predict that the Democratic Party will win this election. The model has an AUC of 0.71, which indicates a high distinguishableness between the proportion of voters voting for the Democratic Party and The Republican Party. Therefore, the result is relatively liable.  Gender and whether the individual is African American are the most significant variables in determining an individual’s probability of voting for each party.\par
+
+```{r echo=F}
+plot3 <- ggarrange(ev_3, ggarrange(ev_1,ev_2, ncol=2),nrow = 2)
+annotate_figure(plot3,top = text_grob("Figure 3: Biden vs. Trump each state"))
+
+kable(election_result, caption = "Table 2: Election Result")
+```
+## Weaknesses
+
+In the post-stratification process, we assumed the same election system across the states. In particular, the number of voters in favour of voting for either party was calculated based 
+on the “winner-takes-all” assumption, that the winning candidate is receiving all electoral college votes of the respective state. However, Maine and Nebraska adopt a different system such that one electoral vote is awarded to each candidate, and the rest go to the winning candidate. Such differences could lead to an overestimated winning chance for the Democratic party. \par
+
+Moreover, after a series of cleaning processes performed on the survey and census data, the size of the datasets was significantly reduced. More specifically, the filtered survey and census data contain 4,793  and 198,370 entries, respectively, in contrast with 6,479 and over 20 million entries before cleaning. The reduced sample size may have an adverse impact on the accuracy of the model. As well, survey respondents who haven’t decided on their voting intentions or currently have no voting intentions (i.e. “Don’t Know” and “N/A” for vote_2020) were excluded from our model. Their voting behaviors can cause deviations from actual results.\par
+
+
+## Next Steps
+
+Post-hoc analyses and follow-up surveys will be conducted after the report. Comparisons between the actual and estimated election results will be made to evaluate the model efficiency and the significance of each predictor variable. Follow up surveys will cover questions for critical variables appearing in the census data but not included in the previous Nationscape Survey, such as religion and health insurance coverage. Gathering such data will grant us more predictor variables to work with, thereby improving the model accuracy.\par
+
+
+# References
+1. Tausanovitch, Chris and Lynn Vavreck. 2020. Democracy Fund + UCLA Nationscape, October 10-17, 2019 (version 20200814). Retrieved from https://www.voterstudygroup.org/downloads?key=9e6f71ed-8c3b-4238-be7b-9d332bf90590
+
+2. Steven Ruggles, Sarah Flood, Ronald Goeken, Josiah Grover, Erin Meyer, Jose Pacas and Matthew Sobek. IPUMS USA: Version 10.0 [dataset]. Minneapolis, MN: IPUMS, 2020. https://doi.org/10.18128/D010.V10.0
+
+3. Reilly, C., Gelman, A., & Katz, J. (2001). Poststratification Without Population Level Information on the Postratifying Variable, With Application to Political Polling. Journal of the American Statistical Association.
+
+4. Douglas Bates, Martin Maechler, Ben Bolker, Steve Walker (2015). Fitting Linear Mixed-Effects Models Using lme4. Journal of Statistical Software, 67(1), 1-48.
+  doi:10.18637/jss.v067.i01.
+  
+5. Wickham et al., (2019). Welcome to the tidyverse. Journal of Open Source
+  Software, 4(43), 1686, https://doi.org/10.21105/joss.01686
+
+6. Yihui Xie (2020). knitr: A General-Purpose Package for Dynamic Report Generation
+  in R. R package version 1.30.
+  
+7. Paul-Christian Bürkner (2018). Advanced Bayesian Multilevel Modeling with the R
+  Package brms. The R Journal, 10(1), 395-411. doi:10.32614/RJ-2018-017
+
+8. Kay M (2020). _tidybayes: Tidy Data and Geoms for Bayesian Models_. doi:
+10.5281/zenodo.1308151 (URL: https://doi.org/10.5281/zenodo.1308151), R package
+version 2.1.1, <URL: http://mjskay.github.io/tidybayes/>.
+
+9. Max Kuhn (2020). caret: Classification and Regression Training. R package version
+  6.0-86. https://github.com/topepo/caret/
+  
+10. Xavier Robin, Natacha Turck, Alexandre Hainard, Natalia Tiberti, Frédérique
+  Lisacek, Jean-Charles Sanchez and Markus Müller (2011). pROC: an open-source
+  package for R and S+ to analyze and compare ROC curves. BMC Bioinformatics, 12,
+  p. 77.  DOI: 10.1186/1471-2105-12-77
+  <http://www.biomedcentral.com/1471-2105/12/77/>
+
+11. Hao Zhu (2020). kableExtra: Construct Complex Table with 'kable' and Pipe Syntax.
+  http://haozhu233.github.io/kableExtra/, https://github.com/haozhu233/kableExtra.
+
+
+12. Alboukadel Kassambara (2020). ggpubr: 'ggplot2' Based Publication Ready Plots. R
+  package version 0.4.0. https://rpkgs.datanovia.com/ggpubr/
+
+
+
